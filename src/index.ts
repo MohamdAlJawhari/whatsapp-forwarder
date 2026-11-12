@@ -21,9 +21,34 @@ const CLOSE_REASONS: Record<number, string> = {
 
 const AUTH_DIR = 'auth'
 const queue = new SendQueue()
+const startedAt = Date.now()
 
 let currentSock: WASocket | undefined
 let destination: string | undefined     // replaces DEST_GROUP_JID
+
+const status = {
+  connection: 'starting' as 'starting' | 'open' | 'closed',
+  account: '',
+  destination: '',
+  lastMessageAt: null as string | null,
+  queued: 0,
+  forwarded: 0,
+}
+
+function snapshot() {
+  return {
+    connection: status.connection,
+    account: status.account,
+    destination: status.destination,
+    uptimeMinutes: Math.round((Date.now() - startedAt) / 60000),
+    lastMessageAt: status.lastMessageAt,
+    queued: status.queued,
+    forwarded: status.forwarded,
+    waiting: queue.size,
+    failedAttempts: queue.stats.failedAttempts,
+    gaveUp: queue.stats.gaveUp,
+  }
+}
 
 onCommand('logout', async () => {
     try {
@@ -38,6 +63,9 @@ onCommand('destination', async () => {
     if (currentSock) await chooseDestination(currentSock)
 })
 
+onCommand('status', () => console.log(snapshot()))
+
+
 async function chooseDestination(sock: WASocket) {
     const groups = Object.values(await sock.groupFetchAllParticipating())
     groups.sort((a, b) => a.subject.localeCompare(b.subject))
@@ -51,6 +79,7 @@ async function chooseDestination(sock: WASocket) {
         const group = groups[n - 1]                  // an invalid number gives undefined
         if (group) {
             destination = group.id
+            status.destination = group.subject
             await saveConfig({ destinationJid: group.id, destinationName: group.subject })
             log.info({ destination: group.subject }, 'destination set')
             return
@@ -66,6 +95,7 @@ async function ensureDestination(sock: WASocket) {
 
     if (found) {
         destination = found.id
+        status.destination = found.subject
         log.info({ destination: found.subject }, 'destination loaded')
     } else {
         await chooseDestination(sock)       // nothing saved, or this number is not in that group
@@ -87,11 +117,14 @@ async function start() {
         }
         if (connection === 'open') {
             const number = sock.user?.id.split(':')[0] ?? ''
+            status.connection = 'open'
+            status.account = `…${number.slice(-4)}` 
             log.info({ account: `…${number.slice(-4)}` }, 'connected')
             await ensureDestination(sock)
         }
 
         if (connection === 'close') {
+            status.connection = 'closed'
             const code = (lastDisconnect?.error as Boom)?.output?.statusCode
             log.warn({ code, reason: CLOSE_REASONS[code ?? 0] ?? 'unknown' }, 'connection closed')
 
@@ -128,11 +161,15 @@ async function start() {
                 if (!target) throw new Error('no destination')
                 const sent = await sock.sendMessage(target, content) // test the failure case using: const sent = undefined as any
                 if (!sent?.key?.id) throw new Error('send was not confirmed (no message id)')
+                status.forwarded++ 
                 log.info({ from: msg.key.id, to: sent.key.id }, 'forwarded')
             })
+            status.queued++
+            status.lastMessageAt = new Date().toISOString()
             log.info({ id: msg.key.id, type: getContentType(msg.message), waiting: queue.size }, 'queued')
         }
     })
 }
+setInterval(() => log.info(snapshot(), 'heartbeat'), 5 * 60_000)
 log.info('program starting')
-start()
+setTimeout(start, 3000)   // wait 3 seconds before reconnecting

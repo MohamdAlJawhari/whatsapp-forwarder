@@ -7,12 +7,13 @@ type Job = () => Promise<void>
 export class SendQueue {
     private jobs: Job[] = []
     private running = false
+    stats = { failedAttempts: 0, gaveUp: 0 }
 
     constructor(private opts = { delayMs: 1500, jitterMs: 1000, maxRetries: 3, maxSize: 500 }) { }
 
     push(job: Job): boolean {
         if (this.jobs.length >= this.opts.maxSize) {
-            console.warn('queue full, dropping message')
+            log.warn('queue full, dropping message')
             return false
         }
         this.jobs.push(job)
@@ -43,9 +44,11 @@ export class SendQueue {
                 return
             } catch (err) {
                 log.error({ err, attempt }, 'job attempt failed') // was console.error('job failed (attempt ...')
+                this.stats.failedAttempts++
                 if (attempt < this.opts.maxRetries) await sleep(2000 * attempt) // backoff
             }
         }
         log.error('job gave up') // was console.error('job gave up')
+        this.stats.gaveUp++
     }
 }
