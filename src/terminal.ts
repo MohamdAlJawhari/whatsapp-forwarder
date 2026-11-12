@@ -1,4 +1,5 @@
 import readline from 'node:readline'
+import { log } from './logger.js'
 
 const rl = readline.createInterface({ input: process.stdin })
 
@@ -15,8 +16,12 @@ rl.on('line', (line) => {
         return
     }
 
-    const command = commands.get(text) // otherwise, is this line a known command?
-    if (command) void command()
+    // no question is open: this line is a command
+    const command = commands.get(text)
+    if (command) {
+        log.info({ command: text }, 'terminal command')
+        void command()
+    }
 })
 
 export function onCommand(name: string, action: () => void | Promise<void>) {

@@ -1,7 +1,6 @@
 import makeWASocket, { useMultiFileAuthState, DisconnectReason, getContentType, type WASocket } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import qrcode from 'qrcode-terminal'
-import pino from 'pino'
 
 import { rm } from 'node:fs/promises'
 
@@ -10,6 +9,15 @@ import { buildContent } from './relay.js'
 import { ask, onCommand } from './terminal.js'
 import { loadConfig, saveConfig } from './config.js'
 import { log, baileysLog } from './logger.js'
+
+const CLOSE_REASONS: Record<number, string> = {
+    401: 'logged out',
+    408: 'connection lost or timed out',
+    428: 'connection closed',
+    440: 'connection replaced (another copy uses this session)',
+    500: 'bad session',
+    515: 'restart required (normal right after scanning the QR)',
+}
 
 const AUTH_DIR = 'auth'
 const queue = new SendQueue()
@@ -73,16 +81,19 @@ async function start() {
 
     // listen to connection updates 
     sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
-        if (qr) qrcode.generate(qr, { small: true })   // render the QR in the terminal
-
+        if (qr) {
+            log.info('QR ready, waiting for scan')
+            qrcode.generate(qr, { small: true })   // render the QR in the terminal
+        }
         if (connection === 'open') {
-            log.info('connected')
+            const number = sock.user?.id.split(':')[0] ?? ''
+            log.info({ account: `…${number.slice(-4)}` }, 'connected')
             await ensureDestination(sock)
         }
 
         if (connection === 'close') {
             const code = (lastDisconnect?.error as Boom)?.output?.statusCode
-            log.warn({ code }, 'connection closed')
+            log.warn({ code, reason: CLOSE_REASONS[code ?? 0] ?? 'unknown' }, 'connection closed')
 
             if (code === DisconnectReason.loggedOut) {
                 log.warn('logged out, deleting the session')
@@ -123,5 +134,5 @@ async function start() {
         }
     })
 }
-
+log.info('program starting')
 start()
