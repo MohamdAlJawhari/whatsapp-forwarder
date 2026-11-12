@@ -3,22 +3,23 @@ import { Boom } from '@hapi/boom'
 import qrcode from 'qrcode-terminal'
 import pino from 'pino'
 
+import { rm } from 'node:fs/promises'
+
 import { SendQueue } from './queue.js'
 import { buildContent } from './relay.js'
-
-import { rm } from 'node:fs/promises'
-import readline from 'node:readline'
+import { ask, onCommand } from './terminal.js'
+import { loadConfig, saveConfig } from './config.js'
 
 const AUTH_DIR = 'auth'
 const queue = new SendQueue()
 
-const DEST_GROUP_JID = process.env.DEST_GROUP_JID ?? '120363409777555529@g.us'
+// const DEST_GROUP_JID = process.env.DEST_GROUP_JID ?? '120363409777555529@g.us'
 const logger = pino({ level: 'warn' }) // quiet Baileys' internal logs; try 'debug' later to see the protocol
 
-let currentSock: WASocket | undefined   // always points to the latest socket
+let currentSock: WASocket | undefined
+let destination: string | undefined     // replaces DEST_GROUP_JID
 
-readline.createInterface({ input: process.stdin }).on('line', async (line) => {
-    if (line.trim() !== 'logout') return
+onCommand('logout', async () => {
     try {
         console.log('logging out...')
         await currentSock?.logout()
@@ -27,6 +28,43 @@ readline.createInterface({ input: process.stdin }).on('line', async (line) => {
     }
 })
 
+onCommand('destination', async () => {
+    if (currentSock) await chooseDestination(currentSock)
+})
+
+async function chooseDestination(sock: WASocket) {
+    const groups = Object.values(await sock.groupFetchAllParticipating())
+    groups.sort((a, b) => a.subject.localeCompare(b.subject))
+
+    groups.forEach((g, i) => {
+        console.log(`${i + 1}. ${g.subject}  (${g.participants.length} members)`)
+    })
+
+    while (true) {
+        const n = Number(await ask('Type the number of the destination group: '))
+        const group = groups[n - 1]                  // an invalid number gives undefined
+        if (group) {
+            destination = group.id
+            await saveConfig({ destinationJid: group.id, destinationName: group.subject })
+            console.log(`destination set: ${group.subject}`)
+            return
+        }
+        console.log('Not a valid number, try again.')
+    }
+}
+
+async function ensureDestination(sock: WASocket) {
+    const saved = await loadConfig()
+    const groups = await sock.groupFetchAllParticipating()
+    const found = saved.destinationJid ? groups[saved.destinationJid] : undefined
+
+    if (found) {
+        destination = found.id
+        console.log(`destination: ${found.subject}`)
+    } else {
+        await chooseDestination(sock)       // nothing saved, or this number is not in that group
+    }
+}
 
 async function start() {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
@@ -41,9 +79,7 @@ async function start() {
 
         if (connection === 'open') {
             console.log('connected')
-            // Safe to call API methods only once the connection is open
-            const groups = await sock.groupFetchAllParticipating()
-            for (const [jid, meta] of Object.entries(groups)) console.log(jid, '→', meta.subject)
+            await ensureDestination(sock)
         }
 
         if (connection === 'close') {
@@ -64,16 +100,21 @@ async function start() {
         for (const msg of messages) {
             if (!msg.message) continue
             // if (msg.key.fromMe) continue
+            if (!destination) { console.log('no destination yet, message skipped'); continue }
+
             const jid = msg.key.remoteJid
-            if (!jid || jid === DEST_GROUP_JID) continue
-            if (jid.endsWith('@broadcast')) continue        // status + broadcast lists
+            if (jid === destination) continue  // still protects against a forwarding loop
+            if (!jid || jid.endsWith('@broadcast')) continue  // status + broadcast lists
+
             // skip WhatsApp's internal messages
             const kind = getContentType(msg.message)
             if (kind === 'protocolMessage' || kind === 'senderKeyDistributionMessage') continue
 
             queue.push(async () => {
                 const content = await buildContent(sock, msg, logger)
-                await sock.sendMessage(DEST_GROUP_JID, content)
+                const target = destination  // read when the job RUNS, not when it was queued
+                if (!target) throw new Error('no destination')
+                await sock.sendMessage(target, content)
             })
             console.log('queued, size:', queue.size)
         }
