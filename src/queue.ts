@@ -1,3 +1,5 @@
+import { log } from './logger.js'
+
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
 type Job = () => Promise<void>
@@ -40,10 +42,10 @@ export class SendQueue {
                 await job()
                 return
             } catch (err) {
-                console.error(`job failed (attempt ${attempt}/${this.opts.maxRetries}):`, err)
+                log.error({ err, attempt }, 'job attempt failed') // was console.error('job failed (attempt ...')
                 if (attempt < this.opts.maxRetries) await sleep(2000 * attempt) // backoff
             }
         }
-        console.error('job gave up')
+        log.error('job gave up') // was console.error('job gave up')
     }
 }

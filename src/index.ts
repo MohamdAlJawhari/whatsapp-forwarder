@@ -9,12 +9,10 @@ import { SendQueue } from './queue.js'
 import { buildContent } from './relay.js'
 import { ask, onCommand } from './terminal.js'
 import { loadConfig, saveConfig } from './config.js'
+import { log, baileysLog } from './logger.js'
 
 const AUTH_DIR = 'auth'
 const queue = new SendQueue()
-
-// const DEST_GROUP_JID = process.env.DEST_GROUP_JID ?? '120363409777555529@g.us'
-const logger = pino({ level: 'warn' }) // quiet Baileys' internal logs; try 'debug' later to see the protocol
 
 let currentSock: WASocket | undefined
 let destination: string | undefined     // replaces DEST_GROUP_JID
@@ -46,7 +44,7 @@ async function chooseDestination(sock: WASocket) {
         if (group) {
             destination = group.id
             await saveConfig({ destinationJid: group.id, destinationName: group.subject })
-            console.log(`destination set: ${group.subject}`)
+            log.info({ destination: group.subject }, 'destination set')
             return
         }
         console.log('Not a valid number, try again.')
@@ -60,7 +58,7 @@ async function ensureDestination(sock: WASocket) {
 
     if (found) {
         destination = found.id
-        console.log(`destination: ${found.subject}`)
+        log.info({ destination: found.subject }, 'destination loaded')
     } else {
         await chooseDestination(sock)       // nothing saved, or this number is not in that group
     }
@@ -68,7 +66,7 @@ async function ensureDestination(sock: WASocket) {
 
 async function start() {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
-    const sock = makeWASocket({ auth: state, logger })
+    const sock = makeWASocket({ auth: state, logger: baileysLog })
     currentSock = sock
 
     sock.ev.on('creds.update', saveCreds)
@@ -78,16 +76,16 @@ async function start() {
         if (qr) qrcode.generate(qr, { small: true })   // render the QR in the terminal
 
         if (connection === 'open') {
-            console.log('connected')
+            log.info('connected')
             await ensureDestination(sock)
         }
 
         if (connection === 'close') {
             const code = (lastDisconnect?.error as Boom)?.output?.statusCode
-            console.log('closed, code:', code)
+            log.warn({ code }, 'connection closed')
 
             if (code === DisconnectReason.loggedOut) {
-                console.log('logged out: deleting the session')
+                log.warn('logged out, deleting the session')
                 await rm(AUTH_DIR, { recursive: true, force: true })
             }
             start()   // after a logout this shows a fresh QR; otherwise it reconnects
@@ -100,7 +98,10 @@ async function start() {
         for (const msg of messages) {
             if (!msg.message) continue
             // if (msg.key.fromMe) continue
-            if (!destination) { console.log('no destination yet, message skipped'); continue }
+            if (!destination) {
+                log.warn('no destination yet, message skipped')
+                continue
+            }
 
             const jid = msg.key.remoteJid
             if (jid === destination) continue  // still protects against a forwarding loop
@@ -111,12 +112,14 @@ async function start() {
             if (kind === 'protocolMessage' || kind === 'senderKeyDistributionMessage') continue
 
             queue.push(async () => {
-                const content = await buildContent(sock, msg, logger)
+                const content = await buildContent(sock, msg, baileysLog)
                 const target = destination  // read when the job RUNS, not when it was queued
                 if (!target) throw new Error('no destination')
-                await sock.sendMessage(target, content)
+                const sent = await sock.sendMessage(target, content) // test the failure case using: const sent = undefined as any
+                if (!sent?.key?.id) throw new Error('send was not confirmed (no message id)')
+                log.info({ from: msg.key.id, to: sent.key.id }, 'forwarded')
             })
-            console.log('queued, size:', queue.size)
+            log.info({ id: msg.key.id, type: getContentType(msg.message), waiting: queue.size }, 'queued')
         }
     })
 }

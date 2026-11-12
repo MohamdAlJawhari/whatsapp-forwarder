@@ -4,3 +4,4 @@ auth
 .env
 sample.json
 data
+logs
