@@ -7,9 +7,19 @@ import { rm } from 'node:fs/promises'
 import { SendQueue } from './queue.js'
 import { buildContent } from './relay.js'
 import { ask, onCommand } from './terminal.js'
-import { loadConfig, saveConfig } from './config.js'
 import { log, baileysLog } from './logger.js'
 import { skipReason } from './filter.js'
+import { DestinationService } from './destination.js'
+
+const destinationService = new DestinationService(async () => {
+    if (!currentSock) throw new Error('not connected')
+    const groups = await currentSock.groupFetchAllParticipating()
+    return Object.values(groups).map((g) => ({
+        id: g.id,
+        name: g.subject,
+        members: g.participants.length,
+    }))
+})
 
 const forwardOwn = process.env.FORWARD_OWN === '1'
 
@@ -27,12 +37,10 @@ const queue = new SendQueue()
 const startedAt = Date.now()
 
 let currentSock: WASocket | undefined
-let destination: string | undefined     // replaces DEST_GROUP_JID
 
 const status = {
     connection: 'starting' as 'starting' | 'open' | 'closed',
     account: '',
-    destination: '',
     lastMessageAt: null as string | null,
     queued: 0,
     forwarded: 0,
@@ -42,7 +50,7 @@ function snapshot() {
     return {
         connection: status.connection,
         account: status.account,
-        destination: status.destination,
+        destination: destinationService.name ?? '',
         uptimeMinutes: Math.round((Date.now() - startedAt) / 60000),
         lastMessageAt: status.lastMessageAt,
         queued: status.queued,
@@ -62,46 +70,22 @@ onCommand('logout', async () => {
     }
 })
 
-onCommand('destination', async () => {
-    if (currentSock) await chooseDestination(currentSock)
-})
+onCommand('destination', promptForDestination)
 
 onCommand('status', () => console.log(snapshot()))
 
-
-async function chooseDestination(sock: WASocket) {
-    const groups = Object.values(await sock.groupFetchAllParticipating())
-    groups.sort((a, b) => a.subject.localeCompare(b.subject))
-
-    groups.forEach((g, i) => {
-        console.log(`${i + 1}. ${g.subject}  (${g.participants.length} members)`)
-    })
+async function promptForDestination() {
+    const groups = await destinationService.choices()
+    groups.forEach((g, i) => console.log(`${i + 1}. ${g.name}  (${g.members} members)`))
 
     while (true) {
         const n = Number(await ask('Type the number of the destination group: '))
-        const group = groups[n - 1]                  // an invalid number gives undefined
+        const group = groups[n - 1]
         if (group) {
-            destination = group.id
-            status.destination = group.subject
-            await saveConfig({ destinationJid: group.id, destinationName: group.subject })
-            log.info({ destination: group.subject }, 'destination set')
+            await destinationService.set(group)
             return
         }
         console.log('Not a valid number, try again.')
-    }
-}
-
-async function ensureDestination(sock: WASocket) {
-    const saved = await loadConfig()
-    const groups = await sock.groupFetchAllParticipating()
-    const found = saved.destinationJid ? groups[saved.destinationJid] : undefined
-
-    if (found) {
-        destination = found.id
-        status.destination = found.subject
-        log.info({ destination: found.subject }, 'destination loaded')
-    } else {
-        await chooseDestination(sock)       // nothing saved, or this number is not in that group
     }
 }
 
@@ -125,7 +109,7 @@ async function start() {
             status.connection = 'open'
             status.account = `…${number.slice(-4)}`
             log.info({ account: `…${number.slice(-4)}` }, 'connected')
-            await ensureDestination(sock)
+            if (!(await destinationService.restore())) await promptForDestination()
         }
 
         if (connection === 'close') {
@@ -136,8 +120,9 @@ async function start() {
             if (code === DisconnectReason.loggedOut) {
                 log.warn('logged out, deleting the session')
                 await rm(AUTH_DIR, { recursive: true, force: true })
+                destinationService.clear()
             }
-            start()   // after a logout this shows a fresh QR; otherwise it reconnects
+            setTimeout(start, 3000)   // after a logout this shows a fresh QR; otherwise it reconnects
         }
     })
 
@@ -148,12 +133,13 @@ async function start() {
             return
         }
         for (const msg of messages) {
-            if (!destination) {
+            const target = destinationService.id
+            if (!target) {
                 log.warn('no destination yet, message skipped')
                 continue
             }
 
-            const reason = skipReason(msg, { destination, forwardOwn })
+            const reason = skipReason(msg, { destination: target, forwardOwn })
             if (reason) {
                 log.debug({ id: msg.key.id, reason, chat: msg.key.remoteJid?.split('@')[1] }, 'skipped')
                 continue
@@ -161,9 +147,9 @@ async function start() {
 
             queue.push(async () => {
                 const content = await buildContent(sock, msg, baileysLog)
-                const target = destination  // read when the job RUNS, not when it was queued
-                if (!target) throw new Error('no destination')
-                const sent = await sock.sendMessage(target, content) // test the failure case using: const sent = undefined as any
+                const currentTarget = destinationService.id  // read when the job RUNS, not when it was queued
+                if (!currentTarget) throw new Error('no destination')
+                const sent = await sock.sendMessage(currentTarget, content) // test the failure case using: const sent = undefined as any
                 if (!sent?.key?.id) throw new Error('send was not confirmed (no message id)')
                 status.forwarded++
                 log.info({ from: msg.key.id, to: sent.key.id }, 'forwarded')
@@ -176,4 +162,4 @@ async function start() {
 }
 setInterval(() => log.info(snapshot(), 'heartbeat'), 5 * 60_000)
 log.info('program starting')
-setTimeout(start, 1000)   // wait 1 second before reconnecting
+start()
