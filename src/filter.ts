@@ -1,8 +1,8 @@
 import { getContentType, type WAMessage } from '@whiskeysockets/baileys'
 
 export type FilterContext = {
-    destination: string     // the group we forward to
-    forwardOwn: boolean     // true only for testing with yourself
+    destination: string | undefined // the group we forward to
+    forwardOwn: boolean // true only for testing with yourself
 }
 
 // A rule returns a reason to SKIP the message, or null to let it pass

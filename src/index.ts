@@ -1,46 +1,21 @@
-import makeWASocket, { useMultiFileAuthState, DisconnectReason, getContentType, type WASocket } from '@whiskeysockets/baileys'
-import { Boom } from '@hapi/boom'
+import { getContentType, type WAMessage } from '@whiskeysockets/baileys'
 import qrcode from 'qrcode-terminal'
 
-import { rm } from 'node:fs/promises'
-
 import { SendQueue } from './queue.js'
-import { buildContent } from './relay.js'
 import { ask, onCommand } from './terminal.js'
-import { log, baileysLog } from './logger.js'
+import { log } from './logger.js'
 import { skipReason } from './filter.js'
 import { DestinationService } from './destination.js'
-
-const destinationService = new DestinationService(async () => {
-    if (!currentSock) throw new Error('not connected')
-    const groups = await currentSock.groupFetchAllParticipating()
-    return Object.values(groups).map((g) => ({
-        id: g.id,
-        name: g.subject,
-        members: g.participants.length,
-    }))
-})
+import { WhatsAppConnection } from './connection.js'
 
 const forwardOwn = process.env.FORWARD_OWN === '1'
-
-const CLOSE_REASONS: Record<number, string> = {
-    401: 'logged out',
-    408: 'connection lost or timed out',
-    428: 'connection closed',
-    440: 'connection replaced (another copy uses this session)',
-    500: 'bad session',
-    515: 'restart required (normal right after scanning the QR)',
-}
-
-const AUTH_DIR = 'auth'
-const queue = new SendQueue()
 const startedAt = Date.now()
 
-let currentSock: WASocket | undefined
+const connection = new WhatsAppConnection()
+const queue = new SendQueue()
+const destinationService = new DestinationService(() => connection.listGroups())
 
 const status = {
-    connection: 'starting' as 'starting' | 'open' | 'closed',
-    account: '',
     lastMessageAt: null as string | null,
     queued: 0,
     forwarded: 0,
@@ -48,8 +23,8 @@ const status = {
 
 function snapshot() {
     return {
-        connection: status.connection,
-        account: status.account,
+        connection: connection.state,
+        account: connection.account,
         destination: destinationService.name ?? '',
         uptimeMinutes: Math.round((Date.now() - startedAt) / 60000),
         lastMessageAt: status.lastMessageAt,
@@ -60,19 +35,6 @@ function snapshot() {
         gaveUp: queue.stats.gaveUp,
     }
 }
-
-onCommand('logout', async () => {
-    try {
-        console.log('logging out...')
-        await currentSock?.logout()
-    } catch (err) {
-        console.error('logout failed:', err)
-    }
-})
-
-onCommand('destination', promptForDestination)
-
-onCommand('status', () => console.log(snapshot()))
 
 async function promptForDestination() {
     const groups = await destinationService.choices()
@@ -89,77 +51,59 @@ async function promptForDestination() {
     }
 }
 
-async function start() {
-    if (forwardOwn) log.warn('FORWARD_OWN is ON: your own messages will be forwarded (testing only)')
+function handleMessage(msg: WAMessage) {
+    const target = destinationService.id
 
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
-    const sock = makeWASocket({ auth: state, logger: baileysLog })
-    currentSock = sock
+    const reason = skipReason(msg, { destination: target, forwardOwn })
+    if (reason) {
+        log.debug({ id: msg.key.id, reason, chat: msg.key.remoteJid?.split('@')[1] }, 'skipped')
+        return
+    }
 
-    sock.ev.on('creds.update', saveCreds)
+    // Only a message that WOULD have been forwarded reaches this warning
+    if (!target) {
+        log.warn({ id: msg.key.id }, 'no destination yet, message NOT forwarded')
+        return
+    }
 
-    // listen to connection updates 
-    sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
-        if (qr) {
-            log.info('QR ready, waiting for scan')
-            qrcode.generate(qr, { small: true })   // render the QR in the terminal
-        }
-        if (connection === 'open') {
-            const number = sock.user?.id.split(':')[0] ?? ''
-            status.connection = 'open'
-            status.account = `…${number.slice(-4)}`
-            log.info({ account: `…${number.slice(-4)}` }, 'connected')
-            if (!(await destinationService.restore())) await promptForDestination()
-        }
-
-        if (connection === 'close') {
-            status.connection = 'closed'
-            const code = (lastDisconnect?.error as Boom)?.output?.statusCode
-            log.warn({ code, reason: CLOSE_REASONS[code ?? 0] ?? 'unknown' }, 'connection closed')
-
-            if (code === DisconnectReason.loggedOut) {
-                log.warn('logged out, deleting the session')
-                await rm(AUTH_DIR, { recursive: true, force: true })
-                destinationService.clear()
-            }
-            setTimeout(start, 3000)   // after a logout this shows a fresh QR; otherwise it reconnects
-        }
+    queue.push(async () => {
+        const currentTarget = destinationService.id   // read when the job RUNS, not when it was queued
+        if (!currentTarget) throw new Error('no destination')
+        const sentId = await connection.relay(msg, currentTarget)
+        status.forwarded++
+        log.info({ from: msg.key.id, to: sentId }, 'forwarded')
     })
-
-    // listen to incoming messages
-    sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        if (type !== 'notify') {
-            log.debug({ type, count: messages.length }, 'upsert ignored (not a live message)')
-            return
-        }
-        for (const msg of messages) {
-            const target = destinationService.id
-            if (!target) {
-                log.warn('no destination yet, message skipped')
-                continue
-            }
-
-            const reason = skipReason(msg, { destination: target, forwardOwn })
-            if (reason) {
-                log.debug({ id: msg.key.id, reason, chat: msg.key.remoteJid?.split('@')[1] }, 'skipped')
-                continue
-            }
-
-            queue.push(async () => {
-                const content = await buildContent(sock, msg, baileysLog)
-                const currentTarget = destinationService.id  // read when the job RUNS, not when it was queued
-                if (!currentTarget) throw new Error('no destination')
-                const sent = await sock.sendMessage(currentTarget, content) // test the failure case using: const sent = undefined as any
-                if (!sent?.key?.id) throw new Error('send was not confirmed (no message id)')
-                status.forwarded++
-                log.info({ from: msg.key.id, to: sent.key.id }, 'forwarded')
-            })
-            status.queued++
-            status.lastMessageAt = new Date().toISOString()
-            log.info({ id: msg.key.id, type: getContentType(msg.message ?? undefined), waiting: queue.size }, 'queued')
-        }
-    })
+    status.queued++
+    status.lastMessageAt = new Date().toISOString()
+    log.info({ id: msg.key.id, type: getContentType(msg.message ?? undefined), waiting: queue.size }, 'queued')
 }
+
+// Connect the pieces
+connection.on({
+    qr: (qr) => {
+        log.info('QR ready, waiting for scan')
+        qrcode.generate(qr, { small: true })
+    },
+    open: async () => {
+        if (!(await destinationService.restore())) await promptForDestination()
+    },
+    loggedOut: () => destinationService.clear(),
+    message: handleMessage,
+})
+
+onCommand('logout', async () => {
+    try {
+        console.log('logging out...')
+        await connection.logout()
+    } catch (err) {
+        console.error('logout failed:', err)
+    }
+})
+onCommand('destination', promptForDestination)
+onCommand('status', () => console.log(snapshot()))
+
 setInterval(() => log.info(snapshot(), 'heartbeat'), 5 * 60_000)
+
+if (forwardOwn) log.warn('FORWARD_OWN is ON: your own messages will be forwarded (testing only)')
 log.info('program starting')
-start()
+void connection.start()
