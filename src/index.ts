@@ -9,6 +9,9 @@ import { buildContent } from './relay.js'
 import { ask, onCommand } from './terminal.js'
 import { loadConfig, saveConfig } from './config.js'
 import { log, baileysLog } from './logger.js'
+import { skipReason } from './filter.js'
+
+const forwardOwn = process.env.FORWARD_OWN === '1'
 
 const CLOSE_REASONS: Record<number, string> = {
     401: 'logged out',
@@ -27,27 +30,27 @@ let currentSock: WASocket | undefined
 let destination: string | undefined     // replaces DEST_GROUP_JID
 
 const status = {
-  connection: 'starting' as 'starting' | 'open' | 'closed',
-  account: '',
-  destination: '',
-  lastMessageAt: null as string | null,
-  queued: 0,
-  forwarded: 0,
+    connection: 'starting' as 'starting' | 'open' | 'closed',
+    account: '',
+    destination: '',
+    lastMessageAt: null as string | null,
+    queued: 0,
+    forwarded: 0,
 }
 
 function snapshot() {
-  return {
-    connection: status.connection,
-    account: status.account,
-    destination: status.destination,
-    uptimeMinutes: Math.round((Date.now() - startedAt) / 60000),
-    lastMessageAt: status.lastMessageAt,
-    queued: status.queued,
-    forwarded: status.forwarded,
-    waiting: queue.size,
-    failedAttempts: queue.stats.failedAttempts,
-    gaveUp: queue.stats.gaveUp,
-  }
+    return {
+        connection: status.connection,
+        account: status.account,
+        destination: status.destination,
+        uptimeMinutes: Math.round((Date.now() - startedAt) / 60000),
+        lastMessageAt: status.lastMessageAt,
+        queued: status.queued,
+        forwarded: status.forwarded,
+        waiting: queue.size,
+        failedAttempts: queue.stats.failedAttempts,
+        gaveUp: queue.stats.gaveUp,
+    }
 }
 
 onCommand('logout', async () => {
@@ -103,6 +106,8 @@ async function ensureDestination(sock: WASocket) {
 }
 
 async function start() {
+    if (forwardOwn) log.warn('FORWARD_OWN is ON: your own messages will be forwarded (testing only)')
+
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
     const sock = makeWASocket({ auth: state, logger: baileysLog })
     currentSock = sock
@@ -118,7 +123,7 @@ async function start() {
         if (connection === 'open') {
             const number = sock.user?.id.split(':')[0] ?? ''
             status.connection = 'open'
-            status.account = `…${number.slice(-4)}` 
+            status.account = `…${number.slice(-4)}`
             log.info({ account: `…${number.slice(-4)}` }, 'connected')
             await ensureDestination(sock)
         }
@@ -138,22 +143,21 @@ async function start() {
 
     // listen to incoming messages
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        if (type !== 'notify') return
+        if (type !== 'notify') {
+            log.debug({ type, count: messages.length }, 'upsert ignored (not a live message)')
+            return
+        }
         for (const msg of messages) {
-            if (!msg.message) continue
-            // if (msg.key.fromMe) continue
             if (!destination) {
                 log.warn('no destination yet, message skipped')
                 continue
             }
 
-            const jid = msg.key.remoteJid
-            if (jid === destination) continue  // still protects against a forwarding loop
-            if (!jid || jid.endsWith('@broadcast')) continue  // status + broadcast lists
-
-            // skip WhatsApp's internal messages
-            const kind = getContentType(msg.message)
-            if (kind === 'protocolMessage' || kind === 'senderKeyDistributionMessage') continue
+            const reason = skipReason(msg, { destination, forwardOwn })
+            if (reason) {
+                log.debug({ id: msg.key.id, reason, chat: msg.key.remoteJid?.split('@')[1] }, 'skipped')
+                continue
+            }
 
             queue.push(async () => {
                 const content = await buildContent(sock, msg, baileysLog)
@@ -161,15 +165,15 @@ async function start() {
                 if (!target) throw new Error('no destination')
                 const sent = await sock.sendMessage(target, content) // test the failure case using: const sent = undefined as any
                 if (!sent?.key?.id) throw new Error('send was not confirmed (no message id)')
-                status.forwarded++ 
+                status.forwarded++
                 log.info({ from: msg.key.id, to: sent.key.id }, 'forwarded')
             })
             status.queued++
             status.lastMessageAt = new Date().toISOString()
-            log.info({ id: msg.key.id, type: getContentType(msg.message), waiting: queue.size }, 'queued')
+            log.info({ id: msg.key.id, type: getContentType(msg.message ?? undefined), waiting: queue.size }, 'queued')
         }
     })
 }
 setInterval(() => log.info(snapshot(), 'heartbeat'), 5 * 60_000)
 log.info('program starting')
-setTimeout(start, 3000)   // wait 3 seconds before reconnecting
+setTimeout(start, 1000)   // wait 1 second before reconnecting
