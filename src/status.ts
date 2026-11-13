@@ -10,6 +10,8 @@ type StatusSources = {
     queue: Pick<SendQueue, 'size' | 'stats'>
 }
 
+export type Status = ReturnType<ReturnType<typeof createStatusReader>>
+
 export function createStatusReader(sources: StatusSources) {
     const startedAt = Date.now()
 

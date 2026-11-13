@@ -1,12 +1,13 @@
 import qrcode from 'qrcode-terminal'
 
 import { SendQueue } from './queue.js'
-import { ask, onCommand } from './terminal.js'
 import { log } from './logger.js'
 import { DestinationService } from './destination.js'
 import { WhatsAppConnection } from './connection.js'
 import { Forwarder } from './forwarder.js'
 import { createStatusReader } from './status.js'
+import { registerTerminalCommands } from './commands.js'
+import type { Controls } from './controls.js'
 
 const forwardOwn = process.env.FORWARD_OWN === '1'
 
@@ -22,32 +23,14 @@ const forwarder = new Forwarder({
 })
 const getStatus = createStatusReader({ connection, destination: destinationService, forwarder, queue })
 
-// 2. Terminal interaction (moves out in R6)
-async function promptForDestination() {
-    const groups = await destinationService.choices()
-    groups.forEach((g, i) => console.log(`${i + 1}. ${g.name}  (${g.members} members)`))
-
-    while (true) {
-        const n = Number(await ask('Type the number of the destination group: '))
-        const group = groups[n - 1]
-        if (group) {
-            await destinationService.set(group)
-            return
-        }
-        console.log('Not a valid number, try again.')
-    }
+// 2. What a user interface may do
+const controls: Controls = {
+    getStatus,
+    logout: () => connection.logout(),
+    destinationChoices: () => destinationService.choices(),
+    setDestination: (group) => destinationService.set(group),
 }
-
-onCommand('logout', async () => {
-    try {
-        console.log('logging out...')
-        await connection.logout()
-    } catch (err) {
-        console.error('logout failed:', err)
-    }
-})
-onCommand('destination', promptForDestination)
-onCommand('status', () => console.log(getStatus()))
+const terminal = registerTerminalCommands(controls)
 
 // 3. Connect the pieces
 connection.on({
@@ -56,7 +39,7 @@ connection.on({
         qrcode.generate(qr, { small: true })
     },
     open: async () => {
-        if (!(await destinationService.restore())) await promptForDestination()
+        if (!(await destinationService.restore())) await terminal.chooseDestination()
     },
     loggedOut: () => destinationService.clear(),
     message: (msg) => forwarder.handle(msg),
