@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>WhatsApp Forwarder</title>
+    <style>
+        :root {
+            color-scheme: light dark;
+            font-family: system-ui, sans-serif;
+        }
+
+        body {
+            max-width: 32rem;
+            margin: 2rem auto;
+            padding: 0 1rem;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        td {
+            padding: .4rem .2rem;
+            border-bottom: 1px solid #8884;
+        }
+
+        td:first-child {
+            opacity: .7;
+        }
+
+        #state {
+            font-weight: 600;
+        }
+
+        #qrbox {
+            text-align: center;
+            margin: 1.5rem 0;
+        }
+
+        #qr {
+            background: #fff;
+            border-radius: .5rem;
+        }
+
+        #notice {
+            padding: .6rem .8rem;
+            border-radius: .4rem;
+            background: #f59e0b33;
+        }
+
+        select {
+            max-width: 100%;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>WhatsApp Forwarder</h1>
+    <p id="state">Loading…</p>
+
+    <div id="qrbox" hidden>
+        <p>Scan with WhatsApp: Linked devices, then Link a device.</p>
+        <img id="qr" alt="WhatsApp QR code" width="280" height="280">
+    </div>
+
+    <p id="notice" hidden>No destination yet: messages are not being forwarded. Choose a group below.</p>
+
+    <table id="rows"></table>
+
+    <h2>Destination</h2>
+    <p>
+        <select id="groups" disabled>
+            <option>Not connected</option>
+        </select>
+        <button id="save" disabled>Save</button>
+    </p>
+
+    <p><button id="logout" disabled>Log out</button></p>
+
+    <script>
+        const GUARD = { 'X-Requested-With': 'forwarder-ui' }
+        let groupsLoaded = false
+        let shownDestination = null
+
+        async function refreshQr(connection) {
+            const box = document.getElementById('qrbox')
+            if (connection === 'open') { box.hidden = true; return }
+            const res = await fetch('/api/qr')
+            if (res.status === 200) {
+                document.getElementById('qr').src = (await res.json()).image
+                box.hidden = false
+            } else {
+                box.hidden = true
+            }
+        }
+
+        async function loadGroups() {
+            const res = await fetch('/api/groups')
+            if (!res.ok) return false
+            const { groups, currentId } = await res.json()
+            const select = document.getElementById('groups')
+            const placeholder = new Option('Choose a group…', '')
+            placeholder.selected = !currentId
+            select.replaceChildren(
+                placeholder,
+                ...groups.map((g) => {
+                    const opt = new Option(g.name + ' (' + g.members + ' members)', g.id)
+                    opt.selected = g.id === currentId
+                    return opt
+                })
+            )
+            select.disabled = false
+            document.getElementById('save').disabled = false
+            return true
+        }
+
+        async function refresh() {
+            const state = document.getElementById('state')
+            try {
+                const res = await fetch('/api/status')
+                if (!res.ok) throw new Error('HTTP ' + res.status)
+                const s = await res.json()
+                const open = s.connection === 'open'
+
+                state.textContent = 'Connection: ' + s.connection
+                document.getElementById('logout').disabled = !open
+                document.getElementById('notice').hidden = !open || s.destination !== ''
+                document.getElementById('rows').replaceChildren(
+                    ...Object.entries(s).map(([key, value]) => {
+                        const tr = document.createElement('tr')
+                        const k = document.createElement('td')
+                        const v = document.createElement('td')
+                        k.textContent = key
+                        v.textContent = value ?? '-'
+                        tr.append(k, v)
+                        return tr
+                    })
+                )
+
+                // Reload the group list when we reconnect, or when the destination changed
+                if (!open || s.destination !== shownDestination) groupsLoaded = false
+                shownDestination = s.destination
+                if (open && !groupsLoaded) groupsLoaded = await loadGroups()
+                if (!open) {
+                    document.getElementById('groups').disabled = true
+                    document.getElementById('save').disabled = true
+                }
+
+                await refreshQr(s.connection)
+            } catch (err) {
+                state.textContent = 'Cannot reach the program (' + err.message + ')'
+            }
+        }
+
+        document.getElementById('save').addEventListener('click', async () => {
+            const id = document.getElementById('groups').value
+            if (!id) return
+            const res = await fetch('/api/destination', {
+                method: 'POST',
+                headers: { ...GUARD, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id }),
+            })
+            if (!res.ok) alert('Could not save the destination (HTTP ' + res.status + ')')
+            refresh()
+        })
+
+        document.getElementById('logout').addEventListener('click', async () => {
+            if (!confirm('Log out of WhatsApp? You will need to scan a QR code again.')) return
+            document.getElementById('logout').disabled = true
+            const res = await fetch('/api/logout', { method: 'POST', headers: GUARD })
+            if (!res.ok) alert('Logout failed (HTTP ' + res.status + ')')
+            refresh()
+        })
+
+        refresh()
+        setInterval(refresh, 3000)
+    </script>
+</body>
+
+</html>

@@ -34,6 +34,7 @@ export type ConnectionHandlers = {
 export class WhatsAppConnection {
     state: ConnectionState = 'starting'
     account = ''
+    qr: string | undefined
 
     private sock: WASocket | undefined
     private handlers: Partial<ConnectionHandlers> = {}
@@ -50,9 +51,13 @@ export class WhatsAppConnection {
         sock.ev.on('creds.update', saveCreds)
 
         sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
-            if (qr) this.handlers.qr?.(qr)
+            if (qr) {
+                this.qr = qr
+                this.handlers.qr?.(qr)
+            }
 
             if (connection === 'open') {
+                this.qr = undefined
                 const number = sock.user?.id.split(':')[0] ?? ''
                 this.state = 'open'
                 this.account = `…${number.slice(-4)}`
@@ -65,6 +70,7 @@ export class WhatsAppConnection {
             }
 
             if (connection === 'close') {
+                this.qr = undefined
                 this.state = 'closed'
                 const code = (lastDisconnect?.error as Boom)?.output?.statusCode
                 log.warn({ code, reason: CLOSE_REASONS[code ?? 0] ?? 'unknown' }, 'connection closed')
@@ -89,6 +95,7 @@ export class WhatsAppConnection {
     }
 
     async logout(): Promise<void> {
+        if (this.state !== 'open') throw new Error('not connected')
         await this.sock?.logout()
     }
 

@@ -8,6 +8,7 @@ import { Forwarder } from './forwarder.js'
 import { createStatusReader } from './status.js'
 import { registerTerminalCommands } from './commands.js'
 import type { Controls } from './controls.js'
+import { startWebServer } from './web.js'
 
 const forwardOwn = process.env.FORWARD_OWN === '1'
 
@@ -26,11 +27,13 @@ const getStatus = createStatusReader({ connection, destination: destinationServi
 // 2. What a user interface may do
 const controls: Controls = {
     getStatus,
+    getQr: () => connection.qr,
     logout: () => connection.logout(),
     destinationChoices: () => destinationService.choices(),
     setDestination: (group) => destinationService.set(group),
+    getDestinationId: () => destinationService.id,
 }
-const terminal = registerTerminalCommands(controls)
+registerTerminalCommands(controls)
 
 // 3. Connect the pieces
 connection.on({
@@ -39,7 +42,9 @@ connection.on({
         qrcode.generate(qr, { small: true })
     },
     open: async () => {
-        if (!(await destinationService.restore())) await terminal.chooseDestination()
+        if (!(await destinationService.restore())) {
+            log.warn('no destination saved: choose one in the web UI, or type "destination" in the terminal')
+        }
     },
     loggedOut: () => destinationService.clear(),
     message: (msg) => forwarder.handle(msg),
@@ -50,4 +55,6 @@ setInterval(() => log.info(getStatus(), 'heartbeat'), 5 * 60_000)
 
 if (forwardOwn) log.warn('FORWARD_OWN is ON: your own messages will be forwarded (testing only)')
 log.info('program starting')
+
+await startWebServer(controls)
 void connection.start()
