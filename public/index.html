@@ -5,260 +5,97 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>WhatsApp Forwarder</title>
-    <style>
-        :root {
-            color-scheme: light dark;
-            font-family: system-ui, sans-serif;
-        }
-
-        body {
-            max-width: 40rem;
-            margin: 2rem auto;
-            padding: 0 1rem;
-        }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-
-        td {
-            padding: .4rem .2rem;
-            border-bottom: 1px solid #8884;
-        }
-
-        td:first-child {
-            opacity: .7;
-        }
-
-        #state {
-            font-weight: 600;
-        }
-
-        #qrbox {
-            text-align: center;
-            margin: 1.5rem 0;
-        }
-
-        #qr {
-            background: #fff;
-            border-radius: .5rem;
-        }
-
-        #notice {
-            padding: .6rem .8rem;
-            border-radius: .4rem;
-            background: #f59e0b33;
-        }
-
-        select {
-            max-width: 100%;
-        }
-
-        summary {
-            cursor: pointer;
-            font-weight: 600;
-            margin: 1rem 0 .5rem;
-        }
-
-        .logs {
-            font: .78rem/1.5 ui-monospace, Consolas, monospace;
-            max-height: 24rem;
-            overflow: auto;
-        }
-
-        .log {
-            white-space: pre-wrap;
-            word-break: break-word;
-            padding: .15rem 0;
-            border-bottom: 1px solid #8882;
-        }
-
-        .log.debug {
-            opacity: .6;
-        }
-
-        .log.warn {
-            color: #b45309;
-        }
-
-        .log.error,
-        .log.fatal {
-            color: #dc2626;
-        }
-    </style>
+    <link rel="stylesheet" href="style.css">
 </head>
 
 <body>
-    <h1>WhatsApp Forwarder</h1>
-    <p id="state">Loading…</p>
+    <main class="app">
+        <header>
+            <div class="brand">
+                <div class="logo">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M5 12h14" />
+                        <path d="M13 6l6 6-6 6" />
+                    </svg>
+                </div>
+                <h1>WhatsApp Forwarder</h1>
+            </div>
+            <div id="pill" class="pill" role="status"><i></i><span id="pillText">Starting…</span></div>
+        </header>
 
-    <div id="qrbox" hidden>
-        <p>Scan with WhatsApp: Linked devices, then Link a device.</p>
-        <img id="qr" alt="WhatsApp QR code" width="280" height="280">
-    </div>
+        <div id="banner" class="banner" role="alert" hidden></div>
 
-    <p id="notice" hidden>No destination yet: messages are not being forwarded. Choose a group below.</p>
+        <section id="destCard" class="card">
+            <div>
+                <div class="label">Forwarding to</div>
+                <div id="destName" class="dest-name">—</div>
+                <div id="destMeta" class="label"></div>
+            </div>
+            <button id="changeBtn" type="button" class="btn" disabled>Change</button>
+        </section>
 
-    <table id="rows"></table>
+        <div id="mainView">
+            <div class="tiles">
+                <div class="tile"><b id="tQueued">0</b><span class="label">Queued</span></div>
+                <div class="tile"><b id="tForwarded">0</b><span class="label">Forwarded</span></div>
+                <div class="tile"><b id="tWaiting">0</b><span class="label">Waiting</span></div>
+                <div id="tileFailed" class="tile"><b id="tFailed">0</b><span class="label">Failed</span></div>
+            </div>
+            <p id="meta" class="label"></p>
+            <section class="activity">
+                <div class="activity-head">
+                    <h2>Recent activity</h2>
+                    <button id="logsBtn" type="button" class="link">All logs</button>
+                </div>
+                <div id="activity"></div>
+            </section>
+        </div>
 
-    <h2>Destination</h2>
-    <p>
-        <select id="groups" disabled>
-            <option>Not connected</option>
-        </select>
-        <button id="save" disabled>Save</button>
-    </p>
+        <section id="qrView" class="center" hidden>
+            <img id="qr" alt="WhatsApp QR code">
+            <div>Scan with WhatsApp:<br>Linked devices, then Link a device.</div>
+        </section>
 
-    <p><button id="logout" disabled>Log out</button></p>
+        <section id="connectingView" class="center" hidden>
+            <div>Connecting to WhatsApp…</div>
+        </section>
 
-    <details id="logsbox">
-        <summary>Logs</summary>
-        <p>
-            <label>Show
-                <select id="loglevel">
-                    <option value="info" selected>Info and above</option>
-                    <option value="warn">Warnings and errors</option>
-                    <option value="error">Errors only</option>
-                    <option value="debug">Everything (debug)</option>
-                </select>
-            </label>
-            <small>Debug lines exist only when LOG_LEVEL=debug.</small>
-        </p>
-        <div id="logs" class="logs"></div>
-    </details>
+        <footer>
+            <button id="logout" type="button" class="danger" disabled>Log out</button>
+            <span class="label">Updates every 3 seconds</span>
+        </footer>
+    </main>
 
-    <script>
-        const GUARD = { 'X-Requested-With': 'forwarder-ui' }
-        let groupsLoaded = false
-        let shownDestination = null
+    <dialog id="destDialog" aria-labelledby="destTitle">
+        <form method="dialog">
+            <h2 id="destTitle">Choose a destination</h2>
+            <label for="groups" class="label">Groups of this WhatsApp account</label>
+            <select id="groups" size="8"></select>
+            <div class="actions">
+                <button class="btn">Cancel</button>
+                <button id="save" class="btn primary" type="button" disabled>Save</button>
+            </div>
+        </form>
+    </dialog>
 
-        async function refreshQr(connection) {
-            const box = document.getElementById('qrbox')
-            if (connection === 'open') { box.hidden = true; return }
-            const res = await fetch('/api/qr')
-            if (res.status === 200) {
-                document.getElementById('qr').src = (await res.json()).image
-                box.hidden = false
-            } else {
-                box.hidden = true
-            }
-        }
+    <dialog id="logsDialog" aria-labelledby="logsTitle">
+        <form method="dialog">
+            <h2 id="logsTitle">Logs</h2>
+            <label for="loglevel" class="label">Show (debug lines exist only when LOG_LEVEL=debug)</label>
+            <select id="loglevel">
+                <option value="info" selected>Info and above</option>
+                <option value="warn">Warnings and errors</option>
+                <option value="error">Errors only</option>
+                <option value="debug">Everything (debug)</option>
+            </select>
+            <div id="logs" class="logs"></div>
+            <div class="actions"><button class="btn">Close</button></div>
+        </form>
+    </dialog>
+        
+    <script src="script.js"></script>
 
-        async function loadGroups() {
-            const res = await fetch('/api/groups')
-            if (!res.ok) return false
-            const { groups, currentId } = await res.json()
-            const select = document.getElementById('groups')
-            const placeholder = new Option('Choose a group…', '')
-            placeholder.selected = !currentId
-            select.replaceChildren(
-                placeholder,
-                ...groups.map((g) => {
-                    const opt = new Option(g.name + ' (' + g.members + ' members)', g.id)
-                    opt.selected = g.id === currentId
-                    return opt
-                })
-            )
-            select.disabled = false
-            document.getElementById('save').disabled = false
-            return true
-        }
-
-        async function refresh() {
-            const state = document.getElementById('state')
-            try {
-                const res = await fetch('/api/status')
-                if (!res.ok) throw new Error('HTTP ' + res.status)
-                const s = await res.json()
-                const open = s.connection === 'open'
-
-                state.textContent = 'Connection: ' + s.connection
-                document.getElementById('logout').disabled = !open
-                document.getElementById('notice').hidden = !open || s.destination !== ''
-                document.getElementById('rows').replaceChildren(
-                    ...Object.entries(s).map(([key, value]) => {
-                        const tr = document.createElement('tr')
-                        const k = document.createElement('td')
-                        const v = document.createElement('td')
-                        k.textContent = key
-                        v.textContent = value ?? '-'
-                        tr.append(k, v)
-                        return tr
-                    })
-                )
-
-                if (!open || s.destination !== shownDestination) groupsLoaded = false
-                shownDestination = s.destination
-                if (open && !groupsLoaded) groupsLoaded = await loadGroups()
-                if (!open) {
-                    document.getElementById('groups').disabled = true
-                    document.getElementById('save').disabled = true
-                }
-
-                await refreshQr(s.connection)
-            } catch (err) {
-                state.textContent = 'Cannot reach the program (' + err.message + ')'
-            }
-        }
-
-        function renderLog(entry) {
-            const row = document.createElement('div')
-            row.className = 'log ' + entry.level
-            const date = new Date(entry.time)
-            row.title = date.toLocaleString()
-            const details = Object.entries(entry.details)
-                .map(([k, v]) => k + '=' + (typeof v === 'object' ? JSON.stringify(v) : v))
-                .join('  ')
-                .slice(0, 300)
-            row.textContent =
-                date.toLocaleTimeString() + '  ' + entry.level.toUpperCase().padEnd(5) + '  ' +
-                entry.msg + (details ? '  ' + details : '')
-            return row
-        }
-
-        async function loadLogs() {
-            if (!document.getElementById('logsbox').open) return    // closed panel: do nothing
-            const container = document.getElementById('logs')
-            const level = document.getElementById('loglevel').value
-            try {
-                const res = await fetch('/api/logs?level=' + encodeURIComponent(level) + '&limit=200')
-                if (!res.ok) throw new Error('HTTP ' + res.status)
-                const entries = await res.json()
-                if (entries.length === 0) container.textContent = 'No log lines yet.'
-                else container.replaceChildren(...entries.map(renderLog))
-            } catch (err) {
-                container.textContent = 'Cannot load logs (' + err.message + ')'
-            }
-        }
-
-        document.getElementById('save').addEventListener('click', async () => {
-            const id = document.getElementById('groups').value
-            if (!id) return
-            const res = await fetch('/api/destination', {
-                method: 'POST',
-                headers: { ...GUARD, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id }),
-            })
-            if (!res.ok) alert('Could not save the destination (HTTP ' + res.status + ')')
-            refresh()
-        })
-
-        document.getElementById('logout').addEventListener('click', async () => {
-            if (!confirm('Log out of WhatsApp? You will need to scan a QR code again.')) return
-            document.getElementById('logout').disabled = true
-            const res = await fetch('/api/logout', { method: 'POST', headers: GUARD })
-            if (!res.ok) alert('Logout failed (HTTP ' + res.status + ')')
-            refresh()
-        })
-
-        document.getElementById('logsbox').addEventListener('toggle', loadLogs)
-        document.getElementById('loglevel').addEventListener('change', loadLogs)
-
-        refresh()
-        setInterval(refresh, 3000)
-        setInterval(loadLogs, 5000)
-    </script>
 </body>
 
 </html>

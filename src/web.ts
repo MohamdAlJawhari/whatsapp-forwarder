@@ -1,6 +1,7 @@
+import fastifyStatic from '@fastify/static'
+import { fileURLToPath } from 'node:url'
 import Fastify from 'fastify'
 import QRCode from 'qrcode'
-import { readFile } from 'node:fs/promises'
 import { log } from './logger.js'
 import type { Controls } from './controls.js'
 
@@ -23,9 +24,8 @@ export async function startWebServer(controls: Controls): Promise<void> {
     })
 
     // The page is read on every request, so you can edit the HTML without restarting
-    app.get('/', async (_req, reply) => {
-        const page = await readFile(new URL('../public/index.html', import.meta.url), 'utf8')
-        return reply.type('text/html; charset=utf-8').send(page)
+    await app.register(fastifyStatic, {
+        root: fileURLToPath(new URL('../public/', import.meta.url)),
     })
 
     app.get('/api/status', async (_req, reply) => {
