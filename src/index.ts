@@ -9,6 +9,7 @@ import { createStatusReader } from './status.js'
 import { registerTerminalCommands } from './commands.js'
 import type { Controls } from './controls.js'
 import { startWebServer } from './web.js'
+import { readLogs } from './logs.js'
 
 const forwardOwn = process.env.FORWARD_OWN === '1'
 
@@ -32,6 +33,7 @@ const controls: Controls = {
     destinationChoices: () => destinationService.choices(),
     setDestination: (group) => destinationService.set(group),
     getDestinationId: () => destinationService.id,
+    readLogs,
 }
 registerTerminalCommands(controls)
 

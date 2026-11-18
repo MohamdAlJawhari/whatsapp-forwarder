@@ -51,6 +51,14 @@ export async function startWebServer(controls: Controls): Promise<void> {
         return { groups: await controls.destinationChoices(), currentId: controls.getDestinationId() }
     })
 
+    app.get<{ Querystring: { level?: string; limit?: string } }>('/api/logs', async (req, reply) => {
+        reply.header('Cache-Control', 'no-store')
+        return controls.readLogs({
+            level: req.query.level,
+            limit: Number(req.query.limit) || undefined,
+        })
+    })
+
     app.post<{ Body: { id?: string } }>('/api/destination', async (req, reply) => {
         const groups = await controls.destinationChoices()
         const group = groups.find((g) => g.id === req.body?.id)

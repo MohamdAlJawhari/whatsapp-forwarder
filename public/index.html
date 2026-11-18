@@ -12,7 +12,7 @@
         }
 
         body {
-            max-width: 32rem;
+            max-width: 40rem;
             margin: 2rem auto;
             padding: 0 1rem;
         }
@@ -54,6 +54,38 @@
         select {
             max-width: 100%;
         }
+
+        summary {
+            cursor: pointer;
+            font-weight: 600;
+            margin: 1rem 0 .5rem;
+        }
+
+        .logs {
+            font: .78rem/1.5 ui-monospace, Consolas, monospace;
+            max-height: 24rem;
+            overflow: auto;
+        }
+
+        .log {
+            white-space: pre-wrap;
+            word-break: break-word;
+            padding: .15rem 0;
+            border-bottom: 1px solid #8882;
+        }
+
+        .log.debug {
+            opacity: .6;
+        }
+
+        .log.warn {
+            color: #b45309;
+        }
+
+        .log.error,
+        .log.fatal {
+            color: #dc2626;
+        }
     </style>
 </head>
 
@@ -79,6 +111,22 @@
     </p>
 
     <p><button id="logout" disabled>Log out</button></p>
+
+    <details id="logsbox">
+        <summary>Logs</summary>
+        <p>
+            <label>Show
+                <select id="loglevel">
+                    <option value="info" selected>Info and above</option>
+                    <option value="warn">Warnings and errors</option>
+                    <option value="error">Errors only</option>
+                    <option value="debug">Everything (debug)</option>
+                </select>
+            </label>
+            <small>Debug lines exist only when LOG_LEVEL=debug.</small>
+        </p>
+        <div id="logs" class="logs"></div>
+    </details>
 
     <script>
         const GUARD = { 'X-Requested-With': 'forwarder-ui' }
@@ -140,7 +188,6 @@
                     })
                 )
 
-                // Reload the group list when we reconnect, or when the destination changed
                 if (!open || s.destination !== shownDestination) groupsLoaded = false
                 shownDestination = s.destination
                 if (open && !groupsLoaded) groupsLoaded = await loadGroups()
@@ -152,6 +199,36 @@
                 await refreshQr(s.connection)
             } catch (err) {
                 state.textContent = 'Cannot reach the program (' + err.message + ')'
+            }
+        }
+
+        function renderLog(entry) {
+            const row = document.createElement('div')
+            row.className = 'log ' + entry.level
+            const date = new Date(entry.time)
+            row.title = date.toLocaleString()
+            const details = Object.entries(entry.details)
+                .map(([k, v]) => k + '=' + (typeof v === 'object' ? JSON.stringify(v) : v))
+                .join('  ')
+                .slice(0, 300)
+            row.textContent =
+                date.toLocaleTimeString() + '  ' + entry.level.toUpperCase().padEnd(5) + '  ' +
+                entry.msg + (details ? '  ' + details : '')
+            return row
+        }
+
+        async function loadLogs() {
+            if (!document.getElementById('logsbox').open) return    // closed panel: do nothing
+            const container = document.getElementById('logs')
+            const level = document.getElementById('loglevel').value
+            try {
+                const res = await fetch('/api/logs?level=' + encodeURIComponent(level) + '&limit=200')
+                if (!res.ok) throw new Error('HTTP ' + res.status)
+                const entries = await res.json()
+                if (entries.length === 0) container.textContent = 'No log lines yet.'
+                else container.replaceChildren(...entries.map(renderLog))
+            } catch (err) {
+                container.textContent = 'Cannot load logs (' + err.message + ')'
             }
         }
 
@@ -175,8 +252,12 @@
             refresh()
         })
 
+        document.getElementById('logsbox').addEventListener('toggle', loadLogs)
+        document.getElementById('loglevel').addEventListener('change', loadLogs)
+
         refresh()
         setInterval(refresh, 3000)
+        setInterval(loadLogs, 5000)
     </script>
 </body>
 
